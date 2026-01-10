@@ -1,8 +1,11 @@
 from scapy.all import *
 import msgpack
-target_ip = "127.0.0.1"
+from rage_hash import RAGEHash
 
-MSG_SERVER_EVENT = 0xFA776e18 # Rage hash for "msgServerEvent"
+supportedEvents = {
+'msgServerEvent': RAGEHash("msgServerEvent"),
+'msgNetEvent': RAGEHash("msgNetEvent")
+}
 
 def parse_client_server_event(payload):
     try:
@@ -12,16 +15,19 @@ def parse_client_server_event(payload):
         packet_type = struct.unpack('<I', payload[offset:offset+4])[0]
         offset += 4
         
-        if packet_type != MSG_SERVER_EVENT:
+        if packet_type not in supportedEvents.values():
             return None
+        
+        if packet_type == supportedEvents['msgNetEvent']:
+            sourceNetId = struct.unpack('<H', payload[offset:offset+2])[0] # this is currently always -1, but may change
+            offset+=2
 
         # Event name length: little-endian uint16
         name_len = struct.unpack('<H', payload[offset:offset+2])[0]
         offset += 2
-        
         # Event name (null-terminated string)
         event_name_bytes = payload[offset:offset+name_len]
-        event_name = event_name_bytes.rstrip(b'\x00').decode('utf-8', errors='replace')
+        event_name = event_name_bytes.split(b'\x00', 1)[0].decode('utf-8', errors='replace')
         offset += name_len
         
         # MessagePack serialized event data
@@ -30,9 +36,10 @@ def parse_client_server_event(payload):
         # Try to deserialize MessagePack data
         try:
             event_data = msgpack.unpackb(event_data_bytes)
+        except msgpack.exceptions.ExtraData as e:
+            event_data = e.unpacked
         except:
             event_data = event_data_bytes.hex()
-        
         return {
             'packet_type': hex(packet_type),
             'event_name': event_name,
@@ -52,16 +59,18 @@ def is_enet_reliable_command(payload):
     return (flags & 0x8000) == 0x8000 or (flags & 0x4000) == 0x4000
     return True
 
+last_payload = None
 def process_udp_packet(packet):
+    global last_payload
     """Process UDP packets looking for client->server events"""
     if not packet.haslayer(UDP):
         return
     
     if Raw not in packet:
         return
-    
-    payload = bytes(packet[Raw].load)
-    
+
+    payload = bytes(packet[UDP].load)
+
     # Skip if packet is too small
     if len(payload) < 12:
         return
@@ -71,10 +80,16 @@ def process_udp_packet(packet):
         return
     
     # Find event name hash in packet
-    packet_type_bytes = struct.pack('<I', MSG_SERVER_EVENT)
-    if packet_type_bytes not in payload:
+    found_packet_type_bytes = None
+    for eventName, eventHash in supportedEvents.items():
+        packet_type_bytes = struct.pack('<I', eventHash)
+        if packet_type_bytes in payload:
+            found_packet_type_bytes = packet_type_bytes
+            break
+    if not found_packet_type_bytes:
         return
-    offset = payload.find(packet_type_bytes)
+
+    offset = payload.find(found_packet_type_bytes)
     if offset == -1:
         return
     
@@ -84,15 +99,23 @@ def process_udp_packet(packet):
     # Parse the event
     result = parse_client_server_event(fivem_payload)
     
+    # Deduplication
+    if payload==last_payload: return
+    last_payload=payload
+
     if result:
         print("\n" + "="*60)
-        print(f"CLIENT -> SERVER EVENT CAPTURED")
+        if int(result['packet_type'], 16)==supportedEvents['msgServerEvent']:
+            print(f"CLIENT -> SERVER EVENT CAPTURED")
+        elif int(result['packet_type'], 16)==supportedEvents['msgNetEvent']:
+            print(f"SERVER -> CLIENT EVENT CAPTURED")
         print("="*60)
         print(f"Source: {packet[IP].src}:{packet[UDP].sport}")
         print(f"Dest: {packet[IP].dst}:{packet[UDP].dport}")
         print(f"Event Name: {result['event_name']}")
         print(f"Event Data: {result['event_data']}")
+        #print(f"Raw Data: {result['raw_event_data']}")
         print("="*60)
 
 if __name__ == "__main__":
-    sniff(filter="udp", iface="Software Loopback Interface 1", prn=process_udp_packet, store=0)
+    sniff(filter="udp", iface="enp6s0", prn=process_udp_packet, store=0)
