@@ -1,6 +1,7 @@
 from scapy.all import *
 import msgpack
 from rage_hash import RAGEHash
+import gui_communication as gui
 
 supportedEvents = {
 'msgServerEvent': RAGEHash("msgServerEvent"),
@@ -57,7 +58,6 @@ def is_enet_reliable_command(payload):
     flags = struct.unpack('>H', payload[0:2])[0]
     # first bit - command, second bit - reliable
     return (flags & 0x8000) == 0x8000 or (flags & 0x4000) == 0x4000
-    return True
 
 last_payload = None
 def process_udp_packet(packet):
@@ -107,15 +107,30 @@ def process_udp_packet(packet):
         print("\n" + "="*60)
         if int(result['packet_type'], 16)==supportedEvents['msgServerEvent']:
             print(f"CLIENT -> SERVER EVENT CAPTURED")
+            direction = "OUT"
         elif int(result['packet_type'], 16)==supportedEvents['msgNetEvent']:
             print(f"SERVER -> CLIENT EVENT CAPTURED")
+            direction = "IN"
+        else:
+            direction = "UNK"
         print("="*60)
-        print(f"Source: {packet[IP].src}:{packet[UDP].sport}")
-        print(f"Dest: {packet[IP].dst}:{packet[UDP].dport}")
+        if IP in packet:
+            src = f"{packet[IP].src}:{packet[UDP].sport}"
+            dst = f"{packet[IP].dst}:{packet[UDP].dport}"
+        elif IPv6 in packet:
+            src = f"{packet[IPv6].src}:{packet[UDP].sport}"
+            dst = f"{packet[IPv6].dst}:{packet[UDP].dport}"
+        else:
+            src = "unknown"
+            dst = "unknown"
+        print(f"Source: {src}")
+        print(f"Dest: {dst}")
         print(f"Event Name: {result['event_name']}")
         print(f"Event Data: {result['event_data']}")
         #print(f"Raw Data: {result['raw_event_data']}")
         print("="*60)
+        gui.send_event_to_gui(result, direction, src=src, dst=dst)
 
 if __name__ == "__main__":
+    gui.start_command_listener()
     sniff(filter="udp", iface="enp6s0", prn=process_udp_packet, store=0)

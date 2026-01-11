@@ -24,12 +24,6 @@ EditDialog::EditDialog(const NetEvent &ev, QWidget *parent)
   m_payload->setPlainText(QString::fromUtf8(ev.payloadUtf8));
   m_payload->setPlaceholderText("Payload (e.g. JSON)...");
 
-  m_hint = new QLabel(
-      "This is a safe prototype: clicking Send only emits a Qt signal.\n"
-      "Hook it to your own authorized backend.",
-      this);
-  m_hint->setWordWrap(true);
-
   auto *form = new QFormLayout;
   form->addRow("Name:", m_name);
   form->addRow("Direction:", m_dir);
@@ -45,7 +39,6 @@ EditDialog::EditDialog(const NetEvent &ev, QWidget *parent)
   layout->addLayout(form);
   layout->addWidget(new QLabel("Payload:", this));
   layout->addWidget(m_payload, 1);
-  layout->addWidget(m_hint);
   layout->addWidget(buttons);
 }
 

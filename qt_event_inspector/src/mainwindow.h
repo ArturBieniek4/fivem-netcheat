@@ -8,9 +8,10 @@ class QLineEdit;
 class QPlainTextEdit;
 class QTableView;
 class QLabel;
+class QJsonObject;
 
 class EventModel;
-class DummyEventSource;
+class SnifferEventSource;
 
 class MainWindow final : public QMainWindow {
   Q_OBJECT
@@ -29,9 +30,10 @@ private slots:
 private:
   void updateDetailsForRow(int row);
   void refreshRowActionsWidget(int row);
+  void sendCommandToSniffer(const QJsonObject &obj);
 
   EventModel *m_model = nullptr;
-  DummyEventSource *m_source = nullptr;
+  SnifferEventSource *m_snifferSource = nullptr;
 
   QTableView *m_table = nullptr;
   QLineEdit *m_filter = nullptr;

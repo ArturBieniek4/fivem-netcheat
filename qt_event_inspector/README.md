@@ -1,12 +1,11 @@
-# Event Inspector (Qt prototype)
+#Event Inspector
 
-A minimal Qt **Widgets** prototype that mimics a tiny slice of Chrome DevTools **Network** panel:
+GUI for FiveM event sniffer that mimics a tiny slice of Chrome DevTools **Network** panel:
 
 - live log (table) of received events
 - per-row **Edit** / **Resend** buttons
 - right-side details view (payload + raw)
 - quick text filter
-- dummy event generator (so you can test UI immediately)
 
 > NOTE: This repo is intentionally **generic** and **safe**. It does **not** include any logic for intercepting or manipulating third-party traffic. Plug it into an **authorized** source of events.
 
@@ -30,27 +29,59 @@ signals:
   void eventCaptured(NetEvent ev);
 ```
 
-Replace it with your own `EventSource` that receives events from your *own* application / test environment, then `connect(...)` to `MainWindow::onEventCaptured`.
+    Replace it with your own `EventSource` that receives events from your *own *
+        application /
+    test environment,
+    then `connect(...)` to `MainWindow::onEventCaptured`
+        .
 
-## Sending
+    ## #TCP bridge(Python sniffer)
 
-The **Send** button in the edit dialog only emits a Qt signal (`sendRequested`) and the prototype logs it back as an `OUT` event. Replace `MainWindow::onSendRequested` with a call to your backend.
+        The GUI starts a local TCP server on an ephemeral port and writes the
+    port number to a file.The Python sniffer reads that file,
+    connects,
+    then sends newline -
+        delimited JSON events :
 
-
-## Build with qmake (Qt Creator / CLI)
-
-### CLI (Linux/macOS)
-```bash
-qmake
-make -j
-./qt_event_inspector
+```json{
+          "type" : "event",
+          "direction" : "IN",
+          "name" : "Example",
+          "payload" : {"k" : "v"},
+          "raw_hex" : "..."
+        }
 ```
 
-### CLI (Windows MinGW)
-```bat
-qmake
-mingw32-make -j
-qt_event_inspector.exe
+    GUI
+    -
+    to -
+    python commands are sent back over the same TCP
+    connection as JSON lines with `type : "command"`.
+
+                                          Port file lookup
+    : -If `EVENT_INSPECTOR_PORT_FILE` is set,
+    it is used.-
+        Otherwise the GUI writes to the OS temp dir as `inspector_port.txt`
+            .
+
+        ##Sending
+
+        The **Send **button in the edit dialog sends the event with the
+        specified direction and payload.
+
+        ##Build with qmake(Qt Creator / CLI)
+
+            ## #CLI(Linux / macOS)
+```bash qmake make
+        -
+        j./ qt_event_inspector
 ```
 
-Open `qt_event_inspector.pro` in Qt Creator if you prefer the IDE.
+            ## #CLI(Windows MinGW)
+```bat qmake mingw32
+        - make -
+        j qt_event_inspector
+            .exe
+```
+
+        Open `qt_event_inspector.pro` in Qt Creator if you prefer the IDE.

@@ -1,23 +1,30 @@
 #include "mainwindow.h"
 
-#include "dummyeventsource.h"
 #include "editdialog.h"
 #include "eventmodel.h"
+#include "sniffereventsource.h"
 
 #include <QAction>
+#include <QFile>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSplitter>
-#include <QTableView>
+#include <QStandardPaths>
 #include <QTabWidget>
+#include <QTableView>
 #include <QToolBar>
 #include <QVBoxLayout>
 
 namespace {
+
+const char kPortFileEnvVar[] = "EVENT_INSPECTOR_PORT_FILE";
+const char kDefaultPortFile[] = "inspector_port.txt";
 
 class RowActionsWidget final : public QWidget {
 public:
@@ -49,11 +56,11 @@ private:
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
-  setWindowTitle("Event Inspector (Qt prototype)");
+  setWindowTitle("Event Inspector");
   resize(1200, 700);
 
   m_model = new EventModel(this);
-  m_source = new DummyEventSource(this);
+  m_snifferSource = new SnifferEventSource(this);
 
   // --- Toolbar: filter + controls
   auto *tb = addToolBar("Main");
@@ -67,9 +74,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   tb->addWidget(m_filter);
 
   auto *clearAct = tb->addAction("Clear");
-  auto *genAct = tb->addAction("Generate");
-  genAct->setToolTip("Start/stop dummy event stream");
-
   connect(clearAct, &QAction::triggered, this, [this] {
     m_model->clear();
     m_summary->setText("Select an event to see details.");
@@ -77,17 +81,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_rawView->clear();
   });
 
-  bool running = false;
-  connect(genAct, &QAction::triggered, this, [this, &running, genAct] {
-    running = !running;
-    genAct->setText(running ? "Stop" : "Generate");
-    if (running)
-      m_source->start();
-    else
-      m_source->stop();
-  });
-
-  connect(m_filter, &QLineEdit::textChanged, this, &MainWindow::onFilterTextChanged);
+  connect(m_filter, &QLineEdit::textChanged, this,
+          &MainWindow::onFilterTextChanged);
 
   // --- Left: table
   m_table = new QTableView(this);
@@ -138,14 +133,37 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   setCentralWidget(split);
 
   // --- Signals
-  connect(m_source, &DummyEventSource::eventCaptured, this, &MainWindow::onEventCaptured);
-  connect(m_table->selectionModel(), &QItemSelectionModel::selectionChanged, this,
-          &MainWindow::onSelectionChanged);
+  connect(m_snifferSource, &SnifferEventSource::eventCaptured, this,
+          &MainWindow::onEventCaptured);
+  connect(m_snifferSource, &SnifferEventSource::error, this,
+          [this](const QString &msg) { m_summary->setText(msg); });
+  connect(m_snifferSource, &SnifferEventSource::listening, this,
+          [this](quint16 port) {
+            QString filePath = qEnvironmentVariable(kPortFileEnvVar);
+            if (filePath.isEmpty()) {
+              filePath = QStandardPaths::writableLocation(
+                  QStandardPaths::TempLocation);
+              if (!filePath.isEmpty()) {
+                filePath += QLatin1Char('/');
+                filePath += kDefaultPortFile;
+              } else {
+                filePath = kDefaultPortFile;
+              }
+            }
 
-  // Start with dummy traffic on.
-  running = true;
-  genAct->setText("Stop");
-  m_source->start();
+            QFile file(filePath);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Truncate |
+                          QIODevice::Text)) {
+              file.write(QByteArray::number(port));
+            } else {
+              m_summary->setText(
+                  QString("Failed to write port file: %1").arg(filePath));
+            }
+          });
+  connect(m_table->selectionModel(), &QItemSelectionModel::selectionChanged,
+          this, &MainWindow::onSelectionChanged);
+
+  m_snifferSource->start();
 }
 
 void MainWindow::onEventCaptured(NetEvent ev) {
@@ -163,10 +181,12 @@ void MainWindow::onEventCaptured(NetEvent ev) {
 
 void MainWindow::refreshRowActionsWidget(int row) {
   const NetEvent *ev = m_model->eventAtRow(row);
-  if (!ev) return;
+  if (!ev)
+    return;
 
   auto *w = new RowActionsWidget(ev->id, m_table);
-  connect(w->editButton(), &QPushButton::clicked, this, [this, id = ev->id] { onEditEvent(id); });
+  connect(w->editButton(), &QPushButton::clicked, this,
+          [this, id = ev->id] { onEditEvent(id); });
   connect(w->resendButton(), &QPushButton::clicked, this,
           [this, id = ev->id] { onResendEvent(id); });
 
@@ -187,7 +207,8 @@ void MainWindow::onSelectionChanged() {
 
 void MainWindow::updateDetailsForRow(int row) {
   const NetEvent *ev = m_model->eventAtRow(row);
-  if (!ev) return;
+  if (!ev)
+    return;
 
   m_summary->setText(QString("[%1] %2  %3  (%4 bytes)\nstatus: %5")
                          .arg(ev->time.toString("yyyy-MM-dd HH:mm:ss.zzz"))
@@ -199,7 +220,7 @@ void MainWindow::updateDetailsForRow(int row) {
   m_payloadView->setPlainText(QString::fromUtf8(ev->payloadUtf8));
 
   if (ev->rawBytes.isEmpty()) {
-    m_rawView->setPlainText("(no raw bytes in this prototype)");
+    m_rawView->setPlainText("");
   } else {
     m_rawView->setPlainText(QString::fromLatin1(ev->rawBytes.toHex(' ')));
   }
@@ -209,9 +230,11 @@ void MainWindow::onFilterTextChanged(const QString &text) {
   const QString needle = text.trimmed();
   for (int row = 0; row < m_model->rowCount(); ++row) {
     const NetEvent *ev = m_model->eventAtRow(row);
-    if (!ev) continue;
+    if (!ev)
+      continue;
 
-    const bool match = needle.isEmpty() || ev->name.contains(needle, Qt::CaseInsensitive) ||
+    const bool match = needle.isEmpty() ||
+                       ev->name.contains(needle, Qt::CaseInsensitive) ||
                        QString::fromUtf8(ev->payloadUtf8)
                            .contains(needle, Qt::CaseInsensitive);
 
@@ -222,7 +245,8 @@ void MainWindow::onFilterTextChanged(const QString &text) {
 void MainWindow::onEditEvent(qint64 id) {
   const int row = m_model->rowForId(id);
   const NetEvent *ev = m_model->eventAtRow(row);
-  if (!ev) return;
+  if (!ev)
+    return;
 
   auto *dlg = new EditDialog(*ev, this);
   connect(dlg, &EditDialog::sendRequested, this, &MainWindow::onSendRequested);
@@ -232,11 +256,21 @@ void MainWindow::onEditEvent(qint64 id) {
 void MainWindow::onResendEvent(qint64 id) {
   const int row = m_model->rowForId(id);
   const NetEvent *ev = m_model->eventAtRow(row);
-  if (!ev) return;
+  if (!ev)
+    return;
+
+  QJsonObject cmd;
+  cmd["type"] = "command";
+  cmd["command"] = "resend";
+  cmd["id"] = static_cast<qint64>(ev->id);
+  cmd["name"] = ev->name;
+  cmd["direction"] = ev->direction;
+  cmd["payload_utf8"] = QString::fromUtf8(ev->payloadUtf8);
+  sendCommandToSniffer(cmd);
 
   NetEvent out = *ev;
   out.time = QDateTime::currentDateTime();
-  out.direction = "OUT";
+  out.direction = ev->direction;
   out.status = "sent (resend)";
 
   m_model->addEvent(std::move(out));
@@ -244,12 +278,23 @@ void MainWindow::onResendEvent(qint64 id) {
 }
 
 void MainWindow::onSendRequested(NetEvent ev) {
-  // In a real app: call your authorized backend.
-  // In this prototype: append it to the log as OUT.
+  QJsonObject cmd;
+  cmd["type"] = "command";
+  cmd["command"] = "send";
+  cmd["name"] = ev.name;
+  cmd["direction"] = ev.direction;
+  cmd["payload_utf8"] = QString::fromUtf8(ev.payloadUtf8);
+  sendCommandToSniffer(cmd);
+
   ev.time = QDateTime::currentDateTime();
-  ev.direction = "OUT";
   ev.status = "sent (edited)";
 
   m_model->addEvent(std::move(ev));
   refreshRowActionsWidget(m_model->rowCount() - 1);
+}
+
+void MainWindow::sendCommandToSniffer(const QJsonObject &obj) {
+  if (!m_snifferSource)
+    return;
+  m_snifferSource->sendCommand(obj);
 }
