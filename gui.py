@@ -20,12 +20,10 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QPlainTextEdit,
-    QPushButton,
     QSplitter,
     QTabWidget,
     QTableView,
@@ -62,13 +60,13 @@ class EventModel(QAbstractTableModel):
     NameCol = 3
     SizeCol = 4
     StatusCol = 5
-    ActionsCol = 6
-    ColumnCount = 7
+    ColumnCount = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._events = []
         self._next_id = 1
+        self._id_to_row = {}
 
     def rowCount(self, parent=QModelIndex()):
         if parent.isValid():
@@ -102,8 +100,6 @@ class EventModel(QAbstractTableModel):
                 return str(len(ev.payload_utf8 or b""))
             if col == self.StatusCol:
                 return ev.status
-            if col == self.ActionsCol:
-                return ""
             return None
 
         if role == Qt.ToolTipRole:
@@ -148,8 +144,6 @@ class EventModel(QAbstractTableModel):
             return "Size"
         if section == self.StatusCol:
             return "Status"
-        if section == self.ActionsCol:
-            return "Actions"
         return None
 
     def flags(self, index):
@@ -166,12 +160,14 @@ class EventModel(QAbstractTableModel):
         row = len(self._events)
         self.beginInsertRows(QModelIndex(), row, row)
         self._events.append(ev)
+        self._id_to_row[ev.id] = row
         self.endInsertRows()
 
     def clear(self):
         self.beginResetModel()
         self._events = []
         self._next_id = 1
+        self._id_to_row = {}
         self.endResetModel()
 
     def event_at_row(self, row: int):
@@ -180,10 +176,7 @@ class EventModel(QAbstractTableModel):
         return self._events[row]
 
     def row_for_id(self, ev_id: int):
-        for idx, ev in enumerate(self._events):
-            if ev.id == ev_id:
-                return idx
-        return -1
+        return self._id_to_row.get(ev_id, -1)
 
 
 def _payload_to_utf8(value):
@@ -402,34 +395,6 @@ class EditDialog(QDialog):
         QMessageBox.warning(self, "Conversion failed", message)
 
 
-class RowActionsWidget(QWidget):
-    def __init__(self, ev_id: int, parent=None):
-        super().__init__(parent)
-        self._id = ev_id
-        self._edit_btn = QPushButton("Edit", self)
-        self._resend_btn = QPushButton("Resend", self)
-        self._edit_btn.setMaximumWidth(70)
-        self._resend_btn.setMaximumWidth(80)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._edit_btn)
-        layout.addWidget(self._resend_btn)
-
-    @property
-    def id(self):
-        return self._id
-
-    @property
-    def edit_button(self):
-        return self._edit_btn
-
-    @property
-    def resend_button(self):
-        return self._resend_btn
-
-
 class MainWindow(QMainWindow):
     def __init__(self, parent=None, event_source=None):
         super().__init__(parent)
@@ -439,6 +404,7 @@ class MainWindow(QMainWindow):
         self._model = EventModel(self)
         self._sniffer_source = event_source or InProcessEventSource(self)
         self._open_dialogs = []
+        self._filter_needle_lower = ""
 
         toolbar = QToolBar("Main", self)
         toolbar.setMovable(False)
@@ -455,6 +421,13 @@ class MainWindow(QMainWindow):
         clear_action.triggered.connect(self._on_clear)
         new_action = toolbar.addAction("New")
         new_action.triggered.connect(self._on_new_event)
+        edit_selected_action = toolbar.addAction("Edit Selected")
+        edit_selected_action.triggered.connect(self._on_edit_selected)
+        resend_selected_action = toolbar.addAction("Resend Selected")
+        resend_selected_action.triggered.connect(self._on_resend_selected)
+        self._autoscroll_action = toolbar.addAction("Auto-scroll")
+        self._autoscroll_action.setCheckable(True)
+        self._autoscroll_action.setChecked(True)
         self._filter.textChanged.connect(self._on_filter_text_changed)
 
         self._table = QTableView(self)
@@ -471,7 +444,6 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(EventModel.NameCol, 220)
         self._table.setColumnWidth(EventModel.SizeCol, 70)
         self._table.setColumnWidth(EventModel.StatusCol, 110)
-        self._table.setColumnWidth(EventModel.ActionsCol, 170)
 
         details = QWidget(self)
         details_layout = QVBoxLayout(details)
@@ -517,19 +489,9 @@ class MainWindow(QMainWindow):
         row_before = self._model.rowCount()
         self._model.add_event(ev)
         row = row_before
-        self._refresh_row_actions_widget(row)
-        self._table.scrollToBottom()
-        self._on_filter_text_changed(self._filter.text())
-
-    def _refresh_row_actions_widget(self, row: int):
-        ev = self._model.event_at_row(row)
-        if ev is None:
-            return
-        widget = RowActionsWidget(ev.id, self._table)
-        widget.edit_button.clicked.connect(lambda _, ev_id=ev.id: self._on_edit_event(ev_id))
-        widget.resend_button.clicked.connect(lambda _, ev_id=ev.id: self._on_resend_event(ev_id))
-        idx = self._model.index(row, EventModel.ActionsCol)
-        self._table.setIndexWidget(idx, widget)
+        self._table.setRowHidden(row, not self._event_matches_filter(ev))
+        if self._autoscroll_action.isChecked():
+            self._table.scrollToBottom()
 
     def _on_selection_changed(self):
         rows = self._table.selectionModel().selectedRows()
@@ -560,23 +522,25 @@ class MainWindow(QMainWindow):
             self._raw_view.setPlainText(" ".join(f"{b:02x}" for b in ev.raw_bytes))
 
     def _on_filter_text_changed(self, text: str):
-        needle = text.strip()
+        self._filter_needle_lower = text.strip().lower()
         for row in range(self._model.rowCount()):
             ev = self._model.event_at_row(row)
             if ev is None:
                 continue
-            payload_text = ""
-            if ev.payload_utf8:
-                try:
-                    payload_text = ev.payload_utf8.decode("utf-8")
-                except UnicodeDecodeError:
-                    payload_text = ev.payload_utf8.decode("utf-8", errors="replace")
-            match = (
-                not needle
-                or (needle.lower() in (ev.name or "").lower())
-                or (needle.lower() in payload_text.lower())
-            )
-            self._table.setRowHidden(row, not match)
+            self._table.setRowHidden(row, not self._event_matches_filter(ev))
+
+    def _event_matches_filter(self, ev: NetEvent) -> bool:
+        if not self._filter_needle_lower:
+            return True
+        if self._filter_needle_lower in (ev.name or "").lower():
+            return True
+        payload_text = ""
+        if ev.payload_utf8:
+            try:
+                payload_text = ev.payload_utf8.decode("utf-8")
+            except UnicodeDecodeError:
+                payload_text = ev.payload_utf8.decode("utf-8", errors="replace")
+        return self._filter_needle_lower in payload_text.lower()
 
     def _on_edit_event(self, ev_id: int):
         row = self._model.row_for_id(ev_id)
@@ -584,6 +548,21 @@ class MainWindow(QMainWindow):
         if ev is None:
             return
         self._open_edit_dialog(ev)
+
+    def _selected_event_id(self):
+        rows = self._table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        ev = self._model.event_at_row(rows[0].row())
+        if ev is None:
+            return None
+        return ev.id
+
+    def _on_edit_selected(self):
+        ev_id = self._selected_event_id()
+        if ev_id is None:
+            return
+        self._on_edit_event(ev_id)
 
     def _on_new_event(self):
         ev = NetEvent(
@@ -624,7 +603,14 @@ class MainWindow(QMainWindow):
             status="sent (resend)",
         )
         self._model.add_event(out)
-        self._refresh_row_actions_widget(self._model.rowCount() - 1)
+        row = self._model.rowCount() - 1
+        self._table.setRowHidden(row, not self._event_matches_filter(out))
+
+    def _on_resend_selected(self):
+        ev_id = self._selected_event_id()
+        if ev_id is None:
+            return
+        self._on_resend_event(ev_id)
 
     def _on_send_requested(self, ev: NetEvent):
         cmd = {
@@ -642,7 +628,8 @@ class MainWindow(QMainWindow):
         ev.time = QDateTime.currentDateTime()
         ev.status = "sent (edited)"
         self._model.add_event(ev)
-        self._refresh_row_actions_widget(self._model.rowCount() - 1)
+        row = self._model.rowCount() - 1
+        self._table.setRowHidden(row, not self._event_matches_filter(ev))
 
     def _open_edit_dialog(self, ev: NetEvent):
         dlg = EditDialog(ev, self)
