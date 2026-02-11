@@ -13,9 +13,11 @@ import subprocess
 import atexit
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from event_names import HashToEventName, EventNameToHash
 import gui as gui
 from net_forwarder import run_tcp_proxy, intercept_client_oob, intercept_server_oob
+from PySide6.QtWidgets import QApplication, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton
 
 import enet
 
@@ -120,6 +122,108 @@ def parse_ip_port(s: str) -> Tuple[str, int]:
     if not (1 <= port <= 65535):
         raise argparse.ArgumentTypeError(f"Port must be 1..65535, got {port}")
     return host, port
+
+
+def _normalize_cfx_input(value: str) -> str:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+
+    lower_cleaned = cleaned.lower()
+    if lower_cleaned.startswith("http://") or lower_cleaned.startswith("https://"):
+        parsed = urlparse(cleaned)
+        path = (parsed.path or "").strip("/")
+        if path.lower().startswith("join/"):
+            parts = path.split("/", 1)
+            return parts[1].strip() if len(parts) > 1 else ""
+        return path
+
+    if lower_cleaned.startswith("cfx.re/"):
+        cleaned = cleaned[len("cfx.re/"):]
+    if cleaned.lower().startswith("join/"):
+        cleaned = cleaned[5:]
+
+    return cleaned.strip().strip("/")
+
+
+class LauncherDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.selected_upstream: Optional[Tuple[str, int]] = None
+        self.setWindowTitle("NetCheat Connect")
+        self.setMinimumWidth(460)
+
+        layout = QFormLayout(self)
+
+        cfx_row = QHBoxLayout()
+        cfx_row.setContentsMargins(0, 0, 0, 0)
+        self.cfx_input = QLineEdit(self)
+        self.cfx_input.setPlaceholderText("cfx code or cfx.re/join/...")
+        self.resolve_btn = QPushButton("RESOLVE", self)
+        self.resolve_btn.clicked.connect(self._on_resolve)
+        cfx_row.addWidget(self.cfx_input)
+        cfx_row.addWidget(self.resolve_btn)
+        layout.addRow(QLabel("CFX.RE/", self), cfx_row)
+
+        ip_row = QHBoxLayout()
+        ip_row.setContentsMargins(0, 0, 0, 0)
+        self.ip_input = QLineEdit(self)
+        self.ip_input.setPlaceholderText("127.0.0.1:30120")
+        self.connect_btn = QPushButton("CONNECT", self)
+        self.connect_btn.clicked.connect(self._on_connect)
+        ip_row.addWidget(self.ip_input)
+        ip_row.addWidget(self.connect_btn)
+        layout.addRow(QLabel("IP:", self), ip_row)
+
+        self.connect_btn.setDefault(True)
+
+    def _on_resolve(self) -> None:
+        cfx_value = _normalize_cfx_input(self.cfx_input.text())
+        if not cfx_value:
+            QMessageBox.warning(self, "Resolve error", "Enter a valid CFX id or cfx.re/join URL.")
+            return
+
+        try:
+            import get_ip_from_cfx
+        except Exception as exc:
+            QMessageBox.critical(self, "Resolve error", f"Failed to import get_ip_from_cfx.py:\n{exc}")
+            return
+
+        try:
+            resolved = get_ip_from_cfx.get_ip(cfx_value)
+        except Exception as exc:
+            QMessageBox.critical(self, "Resolve error", f"Failed to resolve CFX endpoint:\n{exc}")
+            return
+
+        try:
+            host, port = parse_ip_port(str(resolved))
+        except argparse.ArgumentTypeError as exc:
+            QMessageBox.critical(self, "Resolve error", f"Resolver returned invalid endpoint:\n{exc}")
+            return
+
+        self.ip_input.setText(f"{host}:{port}")
+
+    def _on_connect(self) -> None:
+        raw = self.ip_input.text().strip()
+        if not raw:
+            QMessageBox.warning(self, "Connect error", "Enter an IP:PORT endpoint.")
+            return
+        try:
+            self.selected_upstream = parse_ip_port(raw)
+        except argparse.ArgumentTypeError as exc:
+            QMessageBox.critical(self, "Connect error", str(exc))
+            return
+        self.accept()
+
+
+def _pick_upstream_via_launcher() -> Optional[Tuple[str, int]]:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    dialog = LauncherDialog()
+    if dialog.exec() == QDialog.Accepted:
+        return dialog.selected_upstream
+    return None
 
 def log_enet(tag: str, payload: bytes, *, flags: Optional[int] = None, channel: Optional[int] = None) -> None:
     global LAST_EVENT_ID, LAST_NETGAME_TARGETS
@@ -525,10 +629,19 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_sigint)
 
     ap = argparse.ArgumentParser(description="FiveM ENet MiTM (TCP relay + ENet UDP with OOB passthrough).")
-    ap.add_argument("upstream", type=parse_ip_port, help="Upstream IP:PORT")
+    ap.add_argument("upstream", nargs="?", help="Upstream IP:PORT")
     args = ap.parse_args()
 
-    upstream_ip, upstream_port = args.upstream
+    if args.upstream:
+        try:
+            upstream_ip, upstream_port = parse_ip_port(args.upstream)
+        except argparse.ArgumentTypeError as exc:
+            ap.error(str(exc))
+    else:
+        selected = _pick_upstream_via_launcher()
+        if selected is None:
+            return 0
+        upstream_ip, upstream_port = selected
 
     tcp_thread = threading.Thread(
         target=run_tcp_proxy,
