@@ -66,6 +66,21 @@ def _kill_fivem_processes() -> None:
         pass
 
 
+def _launch_fivem(uri: str) -> None:
+    """Open a FiveM URI through the Windows shell.
+
+    FiveM rejects protocol launches when its bootstrapper does not see a shell
+    or browser launch context.  Calling os.startfile() from the bundled
+    executable makes NetCheat the apparent launcher, so hand the URI to
+    Explorer explicitly instead.
+    """
+    subprocess.Popen(
+        ["explorer.exe", uri],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _request_shutdown() -> None:
     global _SHUTDOWN_STARTED
     if _SHUTDOWN_STARTED:
@@ -771,7 +786,7 @@ def main() -> int:
     enet_mitm = EnetMitm(upstream_ip, upstream_port)
     mitm_thread = threading.Thread(target=enet_mitm.run, daemon=True)
     mitm_thread.start()
-    os.startfile(f"fivem://connect/127.0.0.1:{LISTEN_PORT}")
+    _launch_fivem(f"fivem://connect/127.0.0.1:{LISTEN_PORT}")
     try:
         return gui.start_gui()
     finally:
