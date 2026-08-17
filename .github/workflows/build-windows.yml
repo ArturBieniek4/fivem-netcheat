@@ -35,6 +35,8 @@ jobs:
           --onefile
           --name NetCheat
           --collect-all enet
+          --hidden-import secrets
+          --hidden-import string
           main.py
 
       - name: Upload executable artifact

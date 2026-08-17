@@ -1,5 +1,12 @@
 """Built-in middleware templates used by the GUI."""
 
+# These imports are intentionally explicit. PyInstaller cannot discover imports
+# that exist only inside template strings or user-provided middleware files.
+# Keeping template dependencies here makes them available to external scripts
+# in the standalone executable.
+import secrets as _secrets
+import string as _string
+
 EXAMPLES = {
     "Block event names": (
         "block_event_names.py",
