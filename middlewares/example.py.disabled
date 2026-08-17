@@ -1,0 +1,6 @@
+def patch(event):
+    """Return the event unchanged. Return None to block it."""
+    # Example:
+    # if event["name"] == "some:event":
+    #     return None
+    return event

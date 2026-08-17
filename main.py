@@ -15,6 +15,7 @@ from typing import Optional, Tuple, List
 from dataclasses import dataclass
 from urllib.parse import urlparse
 from event_names import HashToEventName, EventNameToHash
+from middleware import MiddlewareManager
 import gui as gui
 from net_forwarder import run_tcp_proxy, intercept_client_oob, intercept_server_oob
 from PySide6.QtWidgets import QApplication, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton
@@ -225,7 +226,7 @@ def _pick_upstream_via_launcher() -> Optional[Tuple[str, int]]:
         return dialog.selected_upstream
     return None
 
-def log_enet(tag: str, payload: bytes, *, flags: Optional[int] = None, channel: Optional[int] = None) -> None:
+def log_enet(tag: str, payload: bytes, *, flags: Optional[int] = None, channel: Optional[int] = None, status: str = "captured") -> None:
     global LAST_EVENT_ID, LAST_NETGAME_TARGETS
     if len(payload) < 4:
         print(f"[{tag}] <short> (len={len(payload)})", flush=True)
@@ -270,6 +271,7 @@ def log_enet(tag: str, payload: bytes, *, flags: Optional[int] = None, channel: 
             "event_name": event_name,
             "event_data": event_data,
             "raw_event_data": event_data_bytes.hex(),
+            "status": status,
         }
         if "(gui)" not in tag: gui.send_event_to_gui(result, "OUT" if "C->S" in tag else "IN")
     elif name=="msgNetGameEventV2":
@@ -313,6 +315,7 @@ def log_enet(tag: str, payload: bytes, *, flags: Optional[int] = None, channel: 
                 "data_hex": data.hex(),
             },
             "raw_event_data": data.hex(),
+            "status": status,
         }
         if "(gui)" not in tag:
             gui.send_event_to_gui(result, "OUT" if "C->S" in tag else "IN")
@@ -344,6 +347,7 @@ class EnetMitm:
         self.pending: List[PendingPacket] = []
         self._l_was_down = False
         self._gui_commands: "queue.Queue[dict]" = queue.Queue()
+        self.middleware = MiddlewareManager(os.path.join(os.path.dirname(__file__), "middlewares"))
         _ACTIVE_MITM = self
 
     def reset_state(self) -> None:
@@ -400,6 +404,113 @@ class EnetMitm:
         pkt = enet.Packet(payload, fwd_flags)
         peer.send(channel, pkt)
         log_enet(tag, payload, flags=flags, channel=channel)
+
+    def _decode_middleware_event(self, payload: bytes, direction: str) -> Optional[dict]:
+        if len(payload) < 4:
+            return None
+        event_type = HashToEventName(struct.unpack_from("<I", payload)[0])
+        offset = 4
+        event = {"direction": direction, "type": event_type, "name": "", "data": None, "raw_data": b""}
+        try:
+            if event_type in {"msgNetEvent", "msgServerEvent"}:
+                if event_type == "msgNetEvent":
+                    event["source_net_id"] = struct.unpack_from("<H", payload, offset)[0]
+                    offset += 2
+                name_len = struct.unpack_from("<H", payload, offset)[0]
+                offset += 2
+                if name_len < 1 or offset + name_len > len(payload):
+                    return None
+                event["name"] = payload[offset:offset + name_len].split(b"\0", 1)[0].decode("utf-8", "replace")
+                offset += name_len
+                event["raw_data"] = payload[offset:]
+                try:
+                    event["data"] = msgpack.unpackb(event["raw_data"], raw=False)
+                except Exception:
+                    event["data"] = event["raw_data"]
+                event["_original_data"] = event["data"]
+                event["_original_raw_data"] = event["raw_data"]
+                return event
+            if event_type == "msgNetGameEventV2":
+                if direction == "IN":
+                    event["client_net_id"] = struct.unpack_from("<H", payload, offset)[0]
+                    offset += 2
+                else:
+                    count = payload[offset]
+                    offset += 1
+                    event["target_players"] = list(struct.unpack_from("<" + "H" * count, payload, offset))
+                    offset += count * 2
+                name_hash = struct.unpack_from("<I", payload, offset)[0]
+                event["name"] = HashToEventName(name_hash)
+                offset += 4
+                event["event_id"] = struct.unpack_from("<H", payload, offset)[0]
+                offset += 2
+                event["is_reply"] = bool(payload[offset])
+                offset += 1
+                event["raw_data"] = payload[offset:]
+                event["data"] = event["raw_data"]
+                event["_original_data"] = event["data"]
+                event["_original_raw_data"] = event["raw_data"]
+                return event
+        except (IndexError, struct.error):
+            return None
+        return None
+
+    def _encode_middleware_event(self, event: dict) -> bytes:
+        event_type = event["type"]
+        msg_hash = EventNameToHash(event_type)
+        if msg_hash is None:
+            raise ValueError(f"unknown event type {event_type!r}")
+        name = str(event["name"])
+        if event_type in {"msgNetEvent", "msgServerEvent"}:
+            raw_data = event.get("raw_data", b"")
+            data = event.get("data")
+            # Prefer an explicitly changed structured value, then changed raw bytes.
+            if data != event.get("_original_data"):
+                raw_data = bytes(data) if isinstance(data, (bytes, bytearray, memoryview)) else msgpack.packb(data, use_bin_type=True)
+            name_bytes = (name + "\0").encode("utf-8")
+            parts = [struct.pack("<I", msg_hash)]
+            if event_type == "msgNetEvent":
+                parts.append(struct.pack("<H", int(event.get("source_net_id", 0xFFFF)) & 0xFFFF))
+            parts.extend((struct.pack("<H", len(name_bytes)), name_bytes, bytes(raw_data)))
+            return b"".join(parts)
+        if event_type == "msgNetGameEventV2":
+            name_hash = EventNameToHash(name)
+            if name_hash is None:
+                raise ValueError(f"unknown net game event {name!r}")
+            raw_data = event.get("raw_data", b"")
+            data = event.get("data")
+            if data != event.get("_original_data"):
+                raw_data = bytes(data)
+            parts = [struct.pack("<I", msg_hash)]
+            if event["direction"] == "IN":
+                parts.append(struct.pack("<H", int(event.get("client_net_id", 0)) & 0xFFFF))
+            else:
+                targets = event.get("target_players") or []
+                parts.extend((struct.pack("<B", len(targets)), b"".join(struct.pack("<H", int(t) & 0xFFFF) for t in targets)))
+            parts.extend((struct.pack("<I", name_hash), struct.pack("<H", int(event.get("event_id", 0)) & 0xFFFF), struct.pack("<B", bool(event.get("is_reply"))), bytes(raw_data)))
+            return b"".join(parts)
+        raise ValueError(f"unsupported event type {event_type!r}")
+
+    def _apply_middlewares_and_forward(self, peer: enet.Peer, payload: bytes, flags: int, channel: int, tag: str, direction: str) -> None:
+        decoded = self._decode_middleware_event(payload, direction)
+        if decoded is None:
+            self._forward(peer, payload, flags, channel, tag)
+            return
+        result = self.middleware.apply(decoded)
+        if result.event is None:
+            log_enet(tag, payload, flags=flags, channel=channel, status=result.status)
+            print(f"[MIDDLEWARE] Dropped {decoded['name']} via {result.middleware}", flush=True)
+            return
+        output = payload
+        if result.status == "changed by middleware":
+            try:
+                output = self._encode_middleware_event(result.event)
+            except Exception as exc:
+                print(f"[MIDDLEWARE] Could not encode changed event: {exc}; forwarding original", flush=True)
+                result = type(result)(decoded, "captured")
+        allowed = enet.PACKET_FLAG_RELIABLE | enet.PACKET_FLAG_UNSEQUENCED | enet.PACKET_FLAG_UNRELIABLE_FRAGMENT
+        peer.send(channel, enet.Packet(output, flags & allowed))
+        log_enet(tag, output, flags=flags, channel=channel, status=result.status)
 
     def _next_event_id(self) -> int:
         global LAST_EVENT_ID
@@ -562,7 +673,7 @@ class EnetMitm:
         elif event.type == enet.EVENT_TYPE_RECEIVE:
             payload = bytes(event.packet.data)
             if self._is_connected(self.server_peer):
-                self._forward(self.server_peer, payload, event.packet.flags, event.channelID, "ENET C->S")
+                self._apply_middlewares_and_forward(self.server_peer, payload, event.packet.flags, event.channelID, "ENET C->S", "OUT")
             else:
                 self.pending.append(PendingPacket(payload, event.packet.flags, event.channelID))
                 log_enet("ENET C->S (queued)", payload, flags=event.packet.flags, channel=event.channelID)
@@ -573,7 +684,7 @@ class EnetMitm:
             print(f"[ENET] Upstream connected {self.server_addr.host}:{self.server_addr.port}", flush=True)
             if self.pending:
                 for pkt in self.pending:
-                    self._forward(self.server_peer, pkt.data, pkt.flags, pkt.channel, "ENET C->S")
+                    self._apply_middlewares_and_forward(self.server_peer, pkt.data, pkt.flags, pkt.channel, "ENET C->S", "OUT")
                 self.pending.clear()
         elif event.type == enet.EVENT_TYPE_DISCONNECT:
             if event.peer is self.server_peer:
@@ -587,7 +698,7 @@ class EnetMitm:
         elif event.type == enet.EVENT_TYPE_RECEIVE:
             payload = bytes(event.packet.data)
             if self._is_connected(self.client_peer):
-                self._forward(self.client_peer, payload, event.packet.flags, event.channelID, "ENET S->C")
+                self._apply_middlewares_and_forward(self.client_peer, payload, event.packet.flags, event.channelID, "ENET S->C", "IN")
 
     def run(self) -> None:
         print(f"[ENET] Listening on UDP :{LISTEN_PORT}, forwarding to {self.server_addr.host}:{self.server_addr.port}", flush=True)

@@ -118,6 +118,11 @@ class EventModel(QAbstractTableModel):
             return font
 
         if role == Qt.ForegroundRole:
+            status = (ev.status or "").lower()
+            if "blocked by middleware" in status:
+                return QBrush(Qt.darkRed)
+            if "changed by middleware" in status:
+                return QBrush(Qt.darkYellow)
             if col == self.DirCol:
                 if ev.direction == "IN":
                     return QBrush(Qt.darkGreen)
@@ -669,7 +674,7 @@ def _build_net_event(result, direction):
     ev.name = result.get("event_name", "")
     ev.payload_utf8 = _payload_to_utf8(_safe_json(result.get("event_data")))
     ev.raw_bytes = bytes.fromhex(result.get("raw_event_data", "") or "")
-    ev.status = "captured"
+    ev.status = result.get("status", "captured")
     return ev
 
 
