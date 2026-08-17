@@ -176,7 +176,14 @@ class LauncherDialog(QDialog):
         ip_row.addWidget(self.connect_btn)
         layout.addRow(QLabel("IP:", self), ip_row)
 
+        self.middlewares_btn = QPushButton("MIDDLEWARES", self)
+        self.middlewares_btn.clicked.connect(self._on_middlewares)
+        layout.addRow("", self.middlewares_btn)
+
         self.connect_btn.setDefault(True)
+
+    def _on_middlewares(self) -> None:
+        gui.MiddlewareManagerDialog(self).exec()
 
     def _on_resolve(self) -> None:
         cfx_value = _normalize_cfx_input(self.cfx_input.text())
@@ -347,7 +354,7 @@ class EnetMitm:
         self.pending: List[PendingPacket] = []
         self._l_was_down = False
         self._gui_commands: "queue.Queue[dict]" = queue.Queue()
-        self.middleware = MiddlewareManager(os.path.join(os.path.dirname(__file__), "middlewares"))
+        self.middleware = MiddlewareManager()
         _ACTIVE_MITM = self
 
     def reset_state(self) -> None:

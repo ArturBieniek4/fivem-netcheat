@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QMessageBox,
 )
+from middleware_gui import MiddlewareManagerDialog
 
 _gui_lock = threading.Lock()
 _gui_app = None
@@ -430,6 +431,8 @@ class MainWindow(QMainWindow):
         edit_selected_action.triggered.connect(self._on_edit_selected)
         resend_selected_action = toolbar.addAction("Resend Selected")
         resend_selected_action.triggered.connect(self._on_resend_selected)
+        middleware_action = toolbar.addAction("Middlewares")
+        middleware_action.triggered.connect(self._open_middleware_manager)
         self._autoscroll_action = toolbar.addAction("Auto-scroll")
         self._autoscroll_action.setCheckable(True)
         self._autoscroll_action.setChecked(True)
@@ -489,6 +492,9 @@ class MainWindow(QMainWindow):
         self._summary.setText("Select an event to see details.")
         self._payload_view.clear()
         self._raw_view.clear()
+
+    def _open_middleware_manager(self):
+        MiddlewareManagerDialog(self).exec()
 
     def _on_event_captured(self, ev: NetEvent):
         row_before = self._model.rowCount()

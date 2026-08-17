@@ -3,7 +3,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from middleware import MiddlewareManager
+from middleware import MiddlewareManager, write_middleware_config
 
 
 class MiddlewareManagerTests(unittest.TestCase):
@@ -69,6 +69,36 @@ class MiddlewareManagerTests(unittest.TestCase):
         """)
         result = MiddlewareManager(self.directory).apply({"order": []})
         self.assertEqual(result.event["order"], ["first", "second"])
+
+    def test_runs_in_configured_order(self):
+        self.write("first.py", """
+            def patch(event):
+                event["order"].append("first")
+                return event
+        """)
+        self.write("second.py", """
+            def patch(event):
+                event["order"].append("second")
+                return event
+        """)
+        write_middleware_config(self.directory, ["second.py", "first.py"], [])
+        result = MiddlewareManager(self.directory).apply({"order": []})
+        self.assertEqual(result.event["order"], ["second", "first"])
+
+    def test_disabled_middleware_is_not_loaded(self):
+        self.write("disabled.py", """
+            def patch(event):
+                return None
+        """)
+        write_middleware_config(self.directory, ["disabled.py"], ["disabled.py"])
+        result = MiddlewareManager(self.directory).apply({"name": "hello"})
+        self.assertEqual(result.status, "captured")
+        self.assertEqual(result.event, {"name": "hello"})
+
+    def test_missing_directory_is_empty(self):
+        missing = self.directory / "not-created"
+        result = MiddlewareManager(missing).apply({"name": "hello"})
+        self.assertEqual(result.event, {"name": "hello"})
 
 
 if __name__ == "__main__":

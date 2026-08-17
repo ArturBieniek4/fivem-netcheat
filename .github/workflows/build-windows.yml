@@ -35,7 +35,6 @@ jobs:
           --onefile
           --name NetCheat
           --collect-all enet
-          --add-data "middlewares;middlewares"
           main.py
 
       - name: Upload executable artifact

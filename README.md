@@ -30,8 +30,12 @@ This tool establishes a Man-in-the-Middle proxy for ENet. It may be thought of a
 
 ## Middlewares
 
-Put Python files in `middlewares/`. Each file must define exactly one public
-function. Scripts are loaded automatically and reloaded after a file changes.
+Use the **Middlewares** button in the application to create, import, edit,
+enable, disable, delete, and reorder middleware scripts. The manager also
+contains built-in examples that can be installed as editable scripts. Scripts
+are stored in the `middlewares/` directory beside `NetCheat.exe` (or beside the
+source files when running from Python), and reload automatically after changes.
+Each file must define exactly one public function.
 The function receives every supported FiveM event as a dictionary and returns:
 
 - the event unchanged to forward it;
@@ -52,7 +56,6 @@ The dictionary contains `direction`, `type`, `name`, `data`, and `raw_data`.
 MessagePack; changing `raw_data` rewrites the opaque payload directly. The GUI
 colors blocked events red and changed events yellow.
 
-An opt-in library is available in `middlewares/examples/`, including outbound
-ANGLE fingerprint randomization, secret redaction, event-name blocking,
-and numeric-field clamping. Copy a reviewed example into `middlewares/` to
-enable it. Enabled middleware files run in alphabetical filename order.
+The built-in examples include outbound ANGLE fingerprint randomization, secret
+redaction, event-name blocking, and numeric-field clamping. Review and adapt an
+example before enabling it; enabled scripts affect live traffic immediately.

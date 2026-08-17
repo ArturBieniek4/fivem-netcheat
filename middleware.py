@@ -10,10 +10,47 @@ from __future__ import annotations
 import copy
 import importlib.util
 import inspect
+import json
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Callable, Optional
+
+
+CONFIG_FILENAME = ".middleware-config.json"
+
+
+def middleware_directory() -> Path:
+    """Return the user-editable middleware directory for this installation."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "middlewares"
+    return Path(__file__).resolve().parent / "middlewares"
+
+
+def read_middleware_config(directory: Path | str) -> dict:
+    directory = Path(directory)
+    try:
+        value = json.loads((directory / CONFIG_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"order": [], "disabled": []}
+    return {
+        "order": [name for name in value.get("order", []) if isinstance(name, str)],
+        "disabled": [name for name in value.get("disabled", []) if isinstance(name, str)],
+    }
+
+
+def write_middleware_config(directory: Path | str, order: list[str], disabled: list[str]) -> None:
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / CONFIG_FILENAME
+    temporary = directory / f"{CONFIG_FILENAME}.tmp"
+    temporary.write_text(
+        json.dumps({"order": order, "disabled": disabled}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
 
 
 @dataclass(frozen=True)
@@ -24,26 +61,39 @@ class PatchResult:
 
 
 class MiddlewareManager:
-    def __init__(self, directory: Path | str = "middlewares") -> None:
-        self.directory = Path(directory)
+    def __init__(self, directory: Path | str | None = None) -> None:
+        self.directory = Path(directory) if directory is not None else middleware_directory()
         self._signature = None
         self._middlewares: list[tuple[str, Callable[[dict], Optional[dict]]]] = []
 
     def _current_signature(self):
         if not self.directory.is_dir():
-            return ()
-        return tuple(
+            return (), None
+        files = tuple(
             (path.name, path.stat().st_mtime_ns, path.stat().st_size)
             for path in sorted(self.directory.glob("*.py"))
             if not path.name.startswith("_")
         )
+        config = self.directory / CONFIG_FILENAME
+        config_signature = None
+        if config.is_file():
+            stat = config.stat()
+            config_signature = (stat.st_mtime_ns, stat.st_size)
+        return files, config_signature
 
     def reload_if_changed(self) -> None:
         signature = self._current_signature()
         if signature == self._signature:
             return
         loaded = []
-        for filename, _, _ in signature:
+        files = {filename: (mtime, size) for filename, mtime, size in signature[0]}
+        config = read_middleware_config(self.directory)
+        disabled = set(config["disabled"])
+        ordered_names = [name for name in config["order"] if name in files]
+        ordered_names.extend(sorted(set(files) - set(ordered_names)))
+        for filename in ordered_names:
+            if filename in disabled:
+                continue
             path = self.directory / filename
             try:
                 spec = importlib.util.spec_from_file_location(
@@ -61,7 +111,7 @@ class MiddlewareManager:
                 print(f"[MIDDLEWARE] Failed to load {path}: {exc}", flush=True)
         self._middlewares = loaded
         self._signature = signature
-        print(f"[MIDDLEWARE] Loaded {len(loaded)} script(s) in alphabetical order", flush=True)
+        print(f"[MIDDLEWARE] Loaded {len(loaded)} enabled script(s) in configured order", flush=True)
 
     @staticmethod
     def _public_functions(module: ModuleType):
