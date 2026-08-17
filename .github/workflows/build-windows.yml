@@ -1,0 +1,57 @@
+name: Build Windows executable
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip pyinstaller && python -m pip install -r requirements.txt
+
+      - name: Build standalone executable
+        run: >-
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --onefile
+          --name NetCheat
+          --collect-all enet
+          --add-data "middlewares;middlewares"
+          main.py
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetCheat-windows-${{ github.sha }}
+          path: dist/NetCheat.exe
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "build-${{ github.sha }}"
+          "dist/NetCheat.exe#NetCheat.exe"
+          --target "${{ github.sha }}"
+          --title "NetCheat build ${{ github.sha }}"
+          --generate-notes

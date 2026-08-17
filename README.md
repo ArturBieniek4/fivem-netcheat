@@ -10,6 +10,11 @@ This software should serve a legititimate purpose only! It is a Man-in-the-Middl
 
 If running on Windows, you can also use the supplied binary file from releases.
 
+The Windows executable is self-contained; Python does not need to be installed
+on the computer that runs it. Every branch push produces a downloadable GitHub
+Actions artifact and publishes `NetCheat.exe` in a GitHub Release tagged to the
+exact commit. Pull requests and manual workflow runs produce the artifact only.
+
 ### Windows release downloads
 
 Windows may prevent the downloaded `NetCheat.exe` release from starting because the file is not digitally signed and is marked as downloaded from the Internet. If you trust the release and obtained it from this repository, right-click the file, select **Properties**, check **Unblock**, and click **Apply** before running it.
